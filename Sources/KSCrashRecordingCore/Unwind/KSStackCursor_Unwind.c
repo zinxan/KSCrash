@@ -83,6 +83,7 @@ typedef struct {
     // State tracking
     bool isFirstFrame;
     bool usedLinkRegister;
+    bool hasUnwound;
     bool reachedEndOfStack;     // Set when FP becomes 0 (thread entry point reached)
     bool framePointerRestored;  // True if last unwind restored FP from stack
     KSUnwindMethod lastMethod;
@@ -484,10 +485,12 @@ static bool advanceCursor(KSStackCursor *cursor)
         goto successfulExit;
     }
 
-    // For ARM architectures, the link register contains the return address for the first call
-    // Use it before trying to unwind
+    // Preserve the historical LR heuristic only for the explicit frame-pointer-only cursor.
+    // Full unwinding must recover the caller from metadata before consuming the original LR.
 #if defined(__arm64__) || defined(__arm__)
-    if (!ctx->usedLinkRegister && ctx->lr != 0) {
+    bool legacyFramePointer = ctx->methods[0] == KSUnwindMethod_FramePointer && ctx->methods[1] == KSUnwindMethod_None;
+    if (legacyFramePointer && !ctx->usedLinkRegister && ctx->lr != 0 &&
+        kscpu_normaliseInstructionPointer(ctx->lr) != kscpu_normaliseInstructionPointer(ctx->pc)) {
         ctx->usedLinkRegister = true;
         nextAddress = ctx->lr;
 
@@ -546,6 +549,7 @@ static bool advanceCursor(KSStackCursor *cursor)
         // The LR frame itself wasn't unwound - we just read the register.
         // Set method to None regardless of what tryUpdateStateAfterLR did.
         ctx->lastMethod = KSUnwindMethod_None;
+        ctx->hasUnwound = true;
 
         // Check if FP became 0 after LR handling - mark end of stack
         // Only treat FP==0 as end-of-stack if FP was actually restored from unwind info.
@@ -565,9 +569,12 @@ static bool advanceCursor(KSStackCursor *cursor)
 #endif
 
     // Try each method in order until one succeeds.
-    // ctx->pc is a return address at this point, so use PC-1 for unwind info lookup.
+    // The interrupted PC is exact; only a recovered return address needs PC-1.
     for (int i = 0; i < KSUNWIND_MAX_METHODS && ctx->methods[i] != KSUnwindMethod_None; i++) {
-        if (tryUnwindWithMethod(ctx, ctx->methods[i], &nextAddress, true /* isReturnAddress */)) {
+        if (tryUnwindWithMethod(ctx, ctx->methods[i], &nextAddress, ctx->hasUnwound)) {
+            ctx->hasUnwound = true;
+            ctx->usedLinkRegister = true;
+            ctx->lr = 0;
             // Check if we've reached end of frame chain.
             // At thread entry points (thread_start, _pthread_start), FP is typically 0.
             // If FP is 0 after unwinding, we've reached the bottom of the stack.
@@ -634,6 +641,7 @@ static void resetCursor(KSStackCursor *cursor)
     ctx->prevSP = 0;
     ctx->isFirstFrame = true;
     ctx->usedLinkRegister = false;
+    ctx->hasUnwound = false;
     ctx->reachedEndOfStack = false;
     ctx->framePointerRestored = false;
     ctx->lastMethod = KSUnwindMethod_None;
@@ -659,6 +667,7 @@ void kssc_initWithUnwindMethods(KSStackCursor *cursor, int maxStackDepth, const 
     ctx->prevSP = 0;
     ctx->isFirstFrame = true;
     ctx->usedLinkRegister = false;
+    ctx->hasUnwound = false;
     ctx->reachedEndOfStack = false;
     ctx->framePointerRestored = false;
     ctx->lastMethod = KSUnwindMethod_None;
