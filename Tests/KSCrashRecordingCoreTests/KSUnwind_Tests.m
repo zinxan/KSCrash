@@ -666,9 +666,8 @@ static KSTestUnwindSection validTestUnwindSection(void)
 }
 
 #if defined(__arm64__) || defined(__arm__)
-/// Verify that the first two frames (PC and LR) report None as their unwind method.
-/// These frames are read directly from registers, not unwound.
-- (void)testUnwindMethod_FirstTwoFramesAreNone
+/// Only the interrupted PC is read directly; its caller must be unwound.
+- (void)testUnwindMethod_FirstFrameIsNoneAndCallerIsUnwound
 {
     // Skip on watchOS where we can't create threads
 #if TARGET_OS_WATCH
@@ -692,10 +691,10 @@ static KSTestUnwindSection validTestUnwindSection(void)
     KSUnwindMethod method1 = kssc_getUnwindMethod(&cursor);
     XCTAssertEqual(method1, KSUnwindMethod_None, @"First frame (PC) method should be None");
 
-    // Frame 2: LR (read directly from register)
+    // Frame 2: caller recovered from metadata or the frame chain
     XCTAssertTrue(cursor.advanceCursor(&cursor), @"Should advance to second frame (LR)");
     KSUnwindMethod method2 = kssc_getUnwindMethod(&cursor);
-    XCTAssertEqual(method2, KSUnwindMethod_None, @"Second frame (LR) method should be None");
+    XCTAssertNotEqual(method2, KSUnwindMethod_None, @"The caller should come from unwind metadata or the frame chain");
 
     [helper resume];
     [helper stop];

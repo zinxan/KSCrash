@@ -437,8 +437,7 @@ static bool parseCIE(const uint8_t *cieData, size_t cieSize, KSDwarfCIE *outCIE)
     return true;
 }
 
-static bool parseFDE(const uint8_t *fdeData, size_t fdeSize, const KSDwarfCIE *cie, uintptr_t fdeAddress,
-                     KSDwarfFDE *outFDE)
+static bool parseFDE(const uint8_t *fdeData, size_t fdeSize, const KSDwarfCIE *cie, KSDwarfFDE *outFDE)
 {
     memset(outFDE, 0, sizeof(*outFDE));
 
@@ -449,7 +448,7 @@ static bool parseFDE(const uint8_t *fdeData, size_t fdeSize, const KSDwarfCIE *c
     };
 
     // PC start (encoded)
-    outFDE->pcStart = readEncodedPointer(&reader, cie->fdePointerEncoding, fdeAddress);
+    outFDE->pcStart = readEncodedPointer(&reader, cie->fdePointerEncoding, 0);
 
     // PC range (same format but no relocation)
     uint8_t rangeFormat = cie->fdePointerEncoding & 0x0F;
@@ -1039,15 +1038,14 @@ static bool evaluateDwarfExpression(const uint8_t *expr, size_t len, uintptr_t c
 }
 
 static bool applyRegisterRule(const KSDwarfRegisterRule *rule, uintptr_t cfa, uintptr_t sp, uintptr_t fp, uintptr_t lr,
-                              uintptr_t *outValue)
+                              uint8_t originalRegister, uintptr_t *outValue)
 {
     switch (rule->type) {
         case KSDwarfRuleUndefined:
             return false;
 
         case KSDwarfRuleSameValue:
-            // Value unchanged - we don't have the original value
-            return false;
+            return getRegisterValue(originalRegister, sp, fp, lr, outValue);
 
         case KSDwarfRuleOffset: {
             // rule->offset can be negative (register saved below CFA), so use signed arithmetic
@@ -1250,7 +1248,7 @@ bool ksdwarf_findFDE(const void *ehFrame, size_t ehFrameSize, uintptr_t targetPC
 
         // Now parse FDE
         KSDwarfFDE fde;
-        if (!parseFDE(ptr, (size_t)(entryEnd - ptr), &cie, (uintptr_t)entryStart, &fde)) {
+        if (!parseFDE(ptr, (size_t)(entryEnd - ptr), &cie, &fde)) {
             ptr = entryEnd;
             continue;
         }
@@ -1296,7 +1294,7 @@ bool ksdwarf_buildCFIRow(const uint8_t *cie, size_t cieSize, const uint8_t *fde,
     // Parse FDE
     KSDwarfFDE fdeData;
     const uint8_t *fdeContent = fde + fdeCiePointerSize;  // Skip CIE pointer
-    if (!parseFDE(fdeContent, fdeSize - fdeCiePointerSize, &cieData, (uintptr_t)fde, &fdeData)) {
+    if (!parseFDE(fdeContent, fdeSize - fdeCiePointerSize, &cieData, &fdeData)) {
         KSLOG_TRACE("Failed to parse FDE");
         return false;
     }
@@ -1380,7 +1378,7 @@ bool ksdwarf_unwind(const void *ehFrame, size_t ehFrameSize, uintptr_t pc, uintp
     // Get return address
     uint8_t raReg = getReturnAddressRegister();
     uintptr_t returnAddress = 0;
-    if (!applyRegisterRule(&row.registers[raReg], cfa, sp, fp, lr, &returnAddress)) {
+    if (!applyRegisterRule(&row.registers[raReg], cfa, sp, fp, lr, raReg, &returnAddress)) {
         KSLOG_TRACE("Failed to get return address (reg %u)", raReg);
         return false;
     }
@@ -1393,9 +1391,9 @@ bool ksdwarf_unwind(const void *ehFrame, size_t ehFrameSize, uintptr_t pc, uintp
     // and must be passed through so the frame-pointer fallback can continue.
     uint8_t fpReg = getFramePointerRegister();
     uintptr_t newFP = 0;
-    if (applyRegisterRule(&row.registers[fpReg], cfa, sp, fp, lr, &newFP)) {
+    if (applyRegisterRule(&row.registers[fpReg], cfa, sp, fp, lr, fpReg, &newFP)) {
         result->framePointer = newFP;
-        result->framePointerRestored = true;  // FP was restored from CFI rules
+        result->framePointerRestored = row.registers[fpReg].type != KSDwarfRuleSameValue;
     } else {
         result->framePointer = fp;
         result->framePointerRestored = false;  // No FP rule present (frameless function)
